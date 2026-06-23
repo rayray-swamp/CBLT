@@ -1,0 +1,74 @@
+# 本番エントロピー継続学習 — fullcorpus（36.7GB, stage1/2/3 = 同分布3分割）1本run
+# LRスケジュール: 全コーパス分で1本、warmup短、トークン(bytes)基準。段境界(8/16GB)でckpt→構造eval→改善停止段でkill。
+# gpu_1(1GPU) batch4 並行hedge: bytes/step = batch4 × seq8192 × 1gpu = 32,768。全37.6GB → ~1,147,459 step
+# node_h(entropy_stage_run)とは別dump_dir。eff batch4 → lr 4e-4(√N), warmup2000, dump20000(=57点)
+dump_dir: /gs/bs/tga-RLA/yoshida/blt_runs/ofat/O1b
+name: "ofat_O1b"
+steps: 2000
+max_steps: null
+probe_freq: null
+seed: 777
+
+optim:
+  lr: 4e-04
+  warmup: 2000
+  lr_min_ratio: 0.1
+  clip: 10.0
+
+distributed:
+  compile: true
+  fsdp_type: full_shard
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+train_entropy_model: true
+model: null
+
+entropy_model:
+  dim: 768
+  n_layers: 14
+  n_heads: 12
+  max_seqlen: 8192
+  vocab_size: 260
+  ffn_dim_multiplier: 1.0
+  sliding_window: 512
+  attn_bias_type: "local_block_causal"
+  attn_impl: "xformers"
+
+data:
+  root_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus
+  preprocess_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus/preprocess
+  entropy_model_name: transformer_100m
+  sources:
+    corpus: 1.0
+  batch_size: 4
+  seq_len: 8192
+  max_encoder_seq_length: 8192
+  prefetch_size: 64
+  load_async: true
+  add_patches: false
+  patcher_args:
+    patching_mode: byte
+  tokenizer_args:
+    name: blt
+    init_kwargs:
+      bpe_tokenizer_path: /gs/bs/tga-RLA/yoshida/blt_data/tokenizer/tokenizer.model
+
+profiling:
+  run: false
+
+checkpoint:
+  dump:
+    every: 20000
+    keep: -1
+  eval:
+    every: 1000000
+    keep: -1
+
+logging:
+  freq: 20
+
+eval_on_gpus: 1
+eval: null

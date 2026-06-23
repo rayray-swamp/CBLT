@@ -1,0 +1,74 @@
+# 最適化A/B実験: gpu_1 batch4 + torch.compile。baseline=entropy_stage_g1(compile無)と MFU比較。別dump_dir・短時間
+# 最適化A/B実験: gpu_1 batch4 + torch.compile。baseline=entropy_stage_g1(compile無)と MFU比較。別dump_dir・短時間
+# 最適化A/B実験: gpu_1 batch4 + torch.compile。baseline=entropy_stage_g1(compile無)と MFU比較。別dump_dir・短時間
+# 最適化A/B実験: gpu_1 batch4 + torch.compile。baseline=entropy_stage_g1(compile無)と MFU比較。別dump_dir・短時間
+dump_dir: /gs/bs/tga-RLA/yoshida/blt_runs/entropy_opt_test
+name: "entropy_opt_test"
+steps: 700
+max_steps: null
+probe_freq: null
+seed: 777
+
+optim:
+  lr: 4e-04
+  warmup: 2000
+  lr_min_ratio: 0.1
+  clip: 10.0
+
+distributed:
+  compile: true
+  fsdp_type: full_shard
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+train_entropy_model: true
+model: null
+
+entropy_model:
+  dim: 768
+  n_layers: 14
+  n_heads: 12
+  max_seqlen: 8192
+  vocab_size: 260
+  ffn_dim_multiplier: 1.0
+  sliding_window: 512
+  attn_bias_type: "local_block_causal"
+  attn_impl: "xformers"
+
+data:
+  root_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus
+  preprocess_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus/preprocess
+  entropy_model_name: transformer_100m
+  sources:
+    corpus: 1.0
+  batch_size: 4
+  seq_len: 8192
+  max_encoder_seq_length: 8192
+  prefetch_size: 64
+  load_async: true
+  add_patches: false
+  patcher_args:
+    patching_mode: byte
+  tokenizer_args:
+    name: blt
+    init_kwargs:
+      bpe_tokenizer_path: /gs/bs/tga-RLA/yoshida/blt_data/tokenizer/tokenizer.model
+
+profiling:
+  run: false
+
+checkpoint:
+  dump:
+    every: 100000
+    keep: -1
+  eval:
+    every: 1000000
+    keep: -1
+
+logging:
+  freq: 20
+
+eval_on_gpus: 1
+eval: null

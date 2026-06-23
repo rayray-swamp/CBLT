@@ -20,6 +20,7 @@ from bytelatent.tokenizers.constants import BPE_ID, OFFSET
 
 class PatchingModeEnum(str, Enum):
     entropy = "entropy"
+    cblt = "cblt"
     bpe = "bpe"
     bpe_patcher = "bpe_patcher"
     space = "space"
@@ -40,6 +41,7 @@ class PatcherArgs(BaseModel):
     device: str = "cuda"
     monotonicity: bool = False
     log_time: bool = False
+    cblt_aggregation: str = "sqrt"  # sqrt | sum | avg (used when patching_mode=cblt)
 
     def build(self) -> "Patcher":
         return Patcher(self)
@@ -336,6 +338,71 @@ def find_bpe_patcher_patch_start_ids(
     return patch_start_ids
 
 
+def aggregate_char_entropy(
+    entropies: torch.Tensor,
+    tokens: torch.Tensor,
+    mode: str = "sqrt",
+) -> torch.Tensor:
+    """
+    Aggregate byte-level entropies at UTF-8 character boundaries.
+
+    BLT convention: entropy[j] = predictive entropy of byte j+1 given bytes 0..j.
+    So the surprisal of byte p is entropy[p-1]. H(c) for char c at bytes [i, j)
+    aggregates the surprisals of ITS bytes = entropies[i-1 : j-1] (lead-1 shift,
+    "規約B"), NOT entropies[i:j] (the self-position sum was an off-by-one, fixed
+    2026-06-23; the lead-1 sum's first term entropy[i-1] matches byte-BLT at out[i-1]).
+    find_entropy_patch_start_ids maps "threshold exceeded at position k" to
+    "patch starts at k+1", so H(c) is placed at (lead - 1) to cut at the char lead.
+
+    Placement rule:
+      - i == 0 (first character): skip — first_ids=[0] in find_entropy_patch_start_ids
+                                   always forces a patch start at position 0.
+      - i > 0: out[i-1] = H(c), so the patch starts at i (= character lead). ✓
+      - All other positions: -inf, preventing cuts inside multi-byte characters.
+
+    tokens values are OFFSET-shifted (raw_byte = token - OFFSET).
+    UTF-8 lead byte: (raw_byte & 0xC0) != 0x80.
+    """
+    raw_bytes = tokens - OFFSET  # recover original byte values; negatives = special tokens
+    is_lead = (raw_bytes & 0xC0) != 0x80  # True for lead bytes and special tokens
+
+    out = torch.full_like(entropies, float("-inf"))
+    bs, seq_len = tokens.shape
+
+    for b in range(bs):
+        i = 0
+        while i < seq_len:
+            if not is_lead[b, i]:
+                i += 1
+                continue
+            if raw_bytes[b, i] < 0:
+                # special token (PAD/BOS/EOS): treat like a 1-byte character
+                if i > 0:
+                    out[b, i - 1] = entropies[b, i - 1]  # 規約B: lead-1
+                i += 1
+                continue
+            # find end of this character's byte span
+            j = i + 1
+            while j < seq_len and not is_lead[b, j]:
+                j += 1
+            ell = j - i
+            # 規約B (off-by-one 修正 2026-06-23): char の各バイトを"予測した"エントロピー
+            # = entropies[i-1 : j-1] を集約（lead-1 シフト）。i==0 は first_ids=[0] が
+            # patch@0 を強制するので集約不要（負 index も回避）。
+            if i > 0:
+                e_sum = entropies[b, i - 1 : j - 1].sum()
+                if mode == "sqrt":
+                    h = e_sum / (ell ** 0.5)
+                elif mode == "sum":
+                    h = e_sum
+                else:  # avg
+                    h = e_sum / ell
+                out[b, i - 1] = h
+            i = j
+
+    return out
+
+
 def find_entropy_patch_start_ids(
     entropies,
     patch_size=None,
@@ -588,6 +655,33 @@ class Patcher:
             if self.log_time:
                 self.log["patch_lengths_from_start_ids"] += time.time() - s
                 s = time.time()
+        # CBLT (UTF-8 character boundary √ℓ-aggregated entropy)
+        elif self.patching_mode == PatchingModeEnum.cblt:
+            if entropies is not None:
+                scores = entropies.to(dtype=torch.float32)
+            elif preds is not None:
+                scores = entropy(preds)
+            else:
+                scores, _ = calculate_entropies(
+                    tokens,
+                    self.entropy_model,
+                    self.patching_batch_size,
+                    self.device,
+                )
+            scores = aggregate_char_entropy(
+                scores, tokens, self.patcher_args.cblt_aggregation
+            )
+            patch_start_ids = find_entropy_patch_start_ids(
+                scores,
+                self.patch_size,
+                include_next_token=include_next_token,
+                threshold=threshold if threshold is not None else self.threshold,
+                threshold_add=self.threshold_add,
+                monotonicity=self.monotonicity,
+            )
+            patch_lengths = patch_lengths_from_start_ids(
+                patch_start_ids, seq_len_next_tok
+            )
         # BPE
         elif self.patching_mode == PatchingModeEnum.bpe:
             patch_start_ids = find_bpe_delim_patch_start_ids(tokens, delim=BPE_ID)

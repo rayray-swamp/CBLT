@@ -187,8 +187,9 @@ def build_fsdp_grouping_plan(model_args: LMTransformerArgs):
         for i in range(model_args.n_layers_global):
             group_plan.append((f"global_transformer.layers.{i}", False))
 
-        for i in range(len(model_args.encoder_hash_byte_group_size)):
-            group_plan.append((f"encoder_hash_tok_embedding.{i}", False))
+        if model_args.encoder_hash_byte_group_size:
+            for i in range(len(model_args.encoder_hash_byte_group_size)):
+                group_plan.append((f"encoder_hash_tok_embedding.{i}", False))
 
     return group_plan
 

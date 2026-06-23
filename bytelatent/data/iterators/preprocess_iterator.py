@@ -94,7 +94,8 @@ class PreprocessIterator(StatefulIterator):
                 tokens = example.tokens
             if (
                 self.patcher is not None
-                and self.patcher.patching_mode == PatchingModeEnum.entropy
+                and self.patcher.patching_mode
+                in (PatchingModeEnum.entropy, PatchingModeEnum.cblt)
             ):
                 assert (
                     example.entropies is not None

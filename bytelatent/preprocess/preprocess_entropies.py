@@ -121,7 +121,10 @@ def main(
                         "[green]Calculating entropies...", total=None
                     )
                     for doc in input_doc_iterator:
-                        sample_id = get_id_from_doc(doc)
+                        try:
+                            sample_id = get_id_from_doc(doc)
+                        except ValueError:
+                            sample_id = str(step)
                         text = get_text(doc)
                         tokens = torch.tensor(tokenizer.encode(text))
                         patch_start = time.time()

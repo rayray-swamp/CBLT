@@ -226,6 +226,11 @@ class MultiprocessIterator(StatefulIterator):
             )
 
         self.base_iterator = base_iterator_state.build()
+        # terminate() + join() before close() to avoid ValueError on Python 3.12
+        # (Process.close() raises if the process is still running)
+        if self.producer.is_alive():
+            self.producer.terminate()
+            self.producer.join(timeout=5)
         self.producer.close()
         self.producer = None
         self.batch_queue = None

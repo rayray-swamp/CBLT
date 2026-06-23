@@ -1,0 +1,80 @@
+# 本番エントロピーモデル【実測プローブ】— 200 steps だけ回して throughput を測る
+# entropy_real.yaml と同一データ・同一アーキ。steps と dump_dir のみ差し替え
+# ここで bytes/秒 を測り「2B換算の総wall-time」を算出 → #cblt に報告 → 本走GO
+
+dump_dir: /gs/bs/tga-RLA/yoshida/blt_runs/entropy_probe
+name: "entropy_probe"
+steps: 200
+max_steps: null
+probe_freq: null
+seed: 777
+
+optim:
+  lr: 4e-04
+  warmup: 500
+  lr_min_ratio: 0.1
+  clip: 10.0
+
+distributed:
+  fsdp_type: full_shard
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+train_entropy_model: true
+model: null
+
+entropy_model:
+  dim: 768
+  n_layers: 14
+  n_heads: 12
+  max_seqlen: 8192
+  vocab_size: 260
+  ffn_dim_multiplier: 1.0
+  sliding_window: 512
+  attn_bias_type: "local_block_causal"
+  attn_impl: "xformers"
+
+data:
+  root_dir: /gs/bs/tga-RLA/yoshida/blt_data/multilingual
+  preprocess_dir: /gs/bs/tga-RLA/yoshida/blt_data/multilingual/preprocess
+  entropy_model_name: transformer_100m
+  sources:
+    culturax_en: 100
+    culturax_ru: 200
+    culturax_ar: 200
+    culturax_ja: 300
+    culturax_zh: 300
+    culturax_ko: 300
+    culturax_hi: 300
+    culturax_th: 300
+  batch_size: 2
+  seq_len: 8192
+  max_encoder_seq_length: 8192
+  prefetch_size: 64
+  load_async: true
+  add_patches: false
+  patcher_args:
+    patching_mode: byte
+  tokenizer_args:
+    name: blt
+    init_kwargs:
+      bpe_tokenizer_path: /gs/bs/tga-RLA/yoshida/blt_data/tokenizer/tokenizer.model
+
+profiling:
+  run: false
+
+checkpoint:
+  dump:
+    every: 1000
+    keep: 1
+  eval:
+    every: 100000
+    keep: -1
+
+logging:
+  freq: 10
+
+eval_on_gpus: 1
+eval: null

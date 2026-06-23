@@ -1,0 +1,85 @@
+# 本番エントロピーモデル学習 — 多言語 CulturaX 配分B (~2.0B bytes)
+# アーキは entropy_model.yaml デフォルト(dim768/14層/100M)を維持・無変更
+# smoke (entropy_smoke.yaml) からの差分はデータ・規模・出力先のみ
+#
+# steps はプローブ実測で確定済み。
+#   実測テキスト 1.67B bytes / (batch 2 × seq_len 8192 = 16384 bytes/step) ≈ 102,000 steps (1パス)
+#   プローブ実測: s/step=0.0898, bytes/秒~182k, 1.67B換算 wall-time ~2.54h (単H100)
+
+dump_dir: /gs/bs/tga-RLA/yoshida/blt_runs/entropy_real
+name: "entropy_real"
+steps: 102000   # 1.67B (実測テキスト) ≈ 1パス分
+max_steps: null
+probe_freq: null
+seed: 777
+
+optim:
+  lr: 4e-04
+  warmup: 500
+  lr_min_ratio: 0.1
+  clip: 10.0
+
+distributed:
+  fsdp_type: full_shard
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+train_entropy_model: true
+model: null
+
+entropy_model:
+  dim: 768
+  n_layers: 14
+  n_heads: 12
+  max_seqlen: 8192
+  vocab_size: 260
+  ffn_dim_multiplier: 1.0
+  sliding_window: 512
+  attn_bias_type: "local_block_causal"
+  attn_impl: "xformers"
+
+data:
+  root_dir: /gs/bs/tga-RLA/yoshida/blt_data/multilingual
+  preprocess_dir: /gs/bs/tga-RLA/yoshida/blt_data/multilingual/preprocess
+  entropy_model_name: transformer_100m
+  sources:
+    # 重み ∝ バイト配分B (各言語100M文字)
+    culturax_en: 100
+    culturax_ru: 200
+    culturax_ar: 200
+    culturax_ja: 300
+    culturax_zh: 300
+    culturax_ko: 300
+    culturax_hi: 300
+    culturax_th: 300
+  batch_size: 2
+  seq_len: 8192
+  max_encoder_seq_length: 8192
+  prefetch_size: 64
+  load_async: true
+  add_patches: false
+  patcher_args:
+    patching_mode: byte
+  tokenizer_args:
+    name: blt
+    init_kwargs:
+      bpe_tokenizer_path: /gs/bs/tga-RLA/yoshida/blt_data/tokenizer/tokenizer.model
+
+profiling:
+  run: false
+
+checkpoint:
+  dump:
+    every: 1000
+    keep: 3
+  eval:
+    every: 100000
+    keep: -1
+
+logging:
+  freq: 10
+
+eval_on_gpus: 1
+eval: null
