@@ -52,10 +52,14 @@ def main(ckpt_dir: str = typer.Option(...), jsonl: str = typer.Option(...),
         if len(toks) < min_toks: continue
         tokens = torch.tensor(toks, dtype=torch.long, device=device).unsqueeze(0)
         ent, _ = calculate_entropies(tokens, model, 1, device)
+        ent = ent.float()                                          # float32化(cross-check~0 / bf16丸め回避)
         out = aggregate_char_entropy(ent, tokens, "sqrt")[0]        # R1 規約B（実patcher）
         raw = text.encode("utf-8")
-        starts = set(); pos = 0
-        for w in tagger(text): starts.add(pos); pos += len(w.surface)  # gold 形態素先頭
+        starts = set(); base = 0                                       # gold 形態素先頭(行ごと=\n対応)
+        for line in text.split("\n"):
+            pos = 0
+            for w in tagger(line): starts.add(base + pos); pos += len(w.surface)
+            base += len(line) + 1  # +1 = \n
         bi = 0; cidx = 0
         while bi < len(raw):
             ell = 1
