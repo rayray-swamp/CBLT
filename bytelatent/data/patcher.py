@@ -403,6 +403,37 @@ def aggregate_char_entropy(
     return out
 
 
+def find_cblt_monotonic_patch_start_ids(scores, threshold):
+    """cblt+monotonic 専用。scores は aggregate_char_entropy の -inf fill 出力
+    （非lead=-inf, 文字cの H(c)=√ℓ集約 が位置 lead_c-1 に finite で配置）。
+    per-char ΔH=H(c)-H(c-1)>θ を満たす文字 c の lead で patch を開始。文字内は候補にしない
+    （mid_char_split=0）。先頭2位置[0,1]は size-1 first patch として強制（モデル要件）。
+    -inf を直接 byte-level monotonic に渡すと -inf→H=+inf, inf-inf=NaN で破綻するため専用経路。"""
+    bs, L = scores.shape
+    finite = torch.isfinite(scores)
+    ar = torch.arange(L, device=scores.device).unsqueeze(0).expand(bs, L)
+    fin_idx = torch.where(finite, ar, torch.full_like(ar, -1))
+    # 各位置の「厳密に手前の finite 位置」index（cummax を1つ右シフト）
+    prev_fin_idx = torch.cat(
+        [torch.full((bs, 1), -1, dtype=torch.long, device=scores.device),
+         torch.cummax(fin_idx, dim=1).values[:, :-1]], dim=1
+    )
+    src = torch.where(finite, scores, torch.zeros_like(scores))
+    prevH = torch.gather(src, 1, prev_fin_idx.clamp(min=0))
+    has_prev = prev_fin_idx >= 0
+    dH = scores - prevH  # finite 位置 p(=lead-1) で H(c)-H(c-1)
+    fire = finite & has_prev & (dH > threshold)  # 先頭文字(has_prev=False)は強制側に任せる
+    mask = torch.zeros((bs, L), dtype=torch.bool, device=scores.device)
+    mask[:, 1:] = fire[:, :-1]  # patch開始は lead = p+1
+    mask[:, 0] = True
+    if L > 1:
+        mask[:, 1] = True
+    patch_start_ids = patch_start_ids_from_patch_start_mask(mask)
+    # find_entropy_patch_start_ids と同様 include_next_token 相当の整形は不要
+    # （mask が seq 全長なので patch_start_ids_from_patch_start_mask が直接 ids を返す）
+    return patch_start_ids
+
+
 def find_entropy_patch_start_ids(
     entropies,
     patch_size=None,
@@ -671,14 +702,21 @@ class Patcher:
             scores = aggregate_char_entropy(
                 scores, tokens, self.patcher_args.cblt_aggregation
             )
-            patch_start_ids = find_entropy_patch_start_ids(
-                scores,
-                self.patch_size,
-                include_next_token=include_next_token,
-                threshold=threshold if threshold is not None else self.threshold,
-                threshold_add=self.threshold_add,
-                monotonicity=self.monotonicity,
-            )
+            thr = threshold if threshold is not None else self.threshold
+            if self.monotonicity:
+                # CBLT monotonic = per-char ΔH>θ（文字lead のみ・文字内 ΔH=0 候補外）。
+                # -inf fill を byte-level monotonic に直接渡すと +inf/NaN で破綻するため専用経路。
+                patch_start_ids = find_cblt_monotonic_patch_start_ids(scores, thr)
+            else:
+                # CBLT 絶対閾値 H>θ（-inf<θ で文字内は非選択）= 既存 smoke 経路
+                patch_start_ids = find_entropy_patch_start_ids(
+                    scores,
+                    self.patch_size,
+                    include_next_token=include_next_token,
+                    threshold=thr,
+                    threshold_add=self.threshold_add,
+                    monotonicity=False,
+                )
             patch_lengths = patch_lengths_from_start_ids(
                 patch_start_ids, seq_len_next_tok
             )
