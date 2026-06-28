@@ -363,42 +363,36 @@ def aggregate_char_entropy(
     tokens values are OFFSET-shifted (raw_byte = token - OFFSET).
     UTF-8 lead byte: (raw_byte & 0xC0) != 0x80.
     """
-    raw_bytes = tokens - OFFSET  # recover original byte values; negatives = special tokens
-    is_lead = (raw_bytes & 0xC0) != 0x80  # True for lead bytes and special tokens
-
-    out = torch.full_like(entropies, float("-inf"))
+    # ベクトル化 (2026-06-29): 旧 per-byte while ループは GPU テンソルを毎バイト bool 評価＝
+    # D2H 同期 32768回/step で ~5s/step のボトルネックだった。cumsum+scatter_add で per-byte
+    # ループを廃止（batch ループのみ）。旧ループと出力ビット一致（scripts/test_aggregate_vectorize.py）。
     bs, seq_len = tokens.shape
-
-    for b in range(bs):
-        i = 0
-        while i < seq_len:
-            if not is_lead[b, i]:
-                i += 1
-                continue
-            if raw_bytes[b, i] < 0:
-                # special token (PAD/BOS/EOS): treat like a 1-byte character
-                if i > 0:
-                    out[b, i - 1] = entropies[b, i - 1]  # 規約B: lead-1
-                i += 1
-                continue
-            # find end of this character's byte span
-            j = i + 1
-            while j < seq_len and not is_lead[b, j]:
-                j += 1
-            ell = j - i
-            # 規約B (off-by-one 修正 2026-06-23): char の各バイトを"予測した"エントロピー
-            # = entropies[i-1 : j-1] を集約（lead-1 シフト）。i==0 は first_ids=[0] が
-            # patch@0 を強制するので集約不要（負 index も回避）。
-            if i > 0:
-                e_sum = entropies[b, i - 1 : j - 1].sum()
-                if mode == "sqrt":
-                    h = e_sum / (ell ** 0.5)
-                elif mode == "sum":
-                    h = e_sum
-                else:  # avg
-                    h = e_sum / ell
-                out[b, i - 1] = h
-            i = j
+    raw_bytes = tokens - OFFSET
+    is_lead = (raw_bytes & 0xC0) != 0x80  # lead byte + 特殊token(負raw)
+    char_id = (torch.cumsum(is_lead.long(), dim=1) - 1).clamp(min=0)  # 各byteの所属文字index
+    # entropy 位置 p は byte(p+1) を予測（規約B: lead-1）。よって p を byte(p+1)の文字に帰属
+    owner = torch.full_like(char_id, -1)
+    owner[:, :-1] = char_id[:, 1:]
+    out = torch.full_like(entropies, float("-inf"))
+    nc = int(char_id.max().item()) + 1
+    for b in range(bs):  # batch のみ。per-byte ループ廃止
+        o = owner[b]
+        e = entropies[b]
+        valid = o >= 0
+        esum = torch.zeros(nc, dtype=e.dtype, device=e.device).scatter_add_(
+            0, o[valid].clamp(min=0), e[valid]
+        )
+        ell = torch.bincount(char_id[b], minlength=nc).to(e.dtype).clamp(min=1)
+        if mode == "sqrt":
+            H = esum / ell.sqrt()
+        elif mode == "sum":
+            H = esum
+        else:  # avg
+            H = esum / ell
+        leads = torch.nonzero(is_lead[b], as_tuple=True)[0]
+        if leads.numel() > 1:
+            # 文字 c>=1 の H を lead_c-1 に配置（c=0 は first_ids=[0] が強制するのでスキップ）
+            out[b].scatter_(0, leads[1:] - 1, H[1:leads.numel()])
 
     return out
 
