@@ -1,0 +1,96 @@
+dump_dir: /gs/bs/tga-RLA/yoshida/blt_runs/body/blt_body_avg_r6
+name: blt_body_avg_r6
+steps: 1121000
+max_steps: null
+probe_freq: null
+seed: 777
+train_entropy_model: false
+optim:
+  lr: 0.0004
+  warmup: 500
+  lr_min_ratio: 0.1
+  clip: 10.0
+distributed:
+  fsdp_type: full_shard
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+model:
+  dim: 512
+  dim_global: 512
+  dim_local_decoder: 256
+  dim_local_encoder: 256
+  n_layers: 8
+  n_layers_global: 8
+  n_layers_local_decoder: 8
+  n_layers_local_encoder: 8
+  n_heads: 8
+  n_heads_global: 8
+  n_heads_local_decoder: 8
+  n_heads_local_encoder: 8
+  max_seqlen: 4096
+  max_encoder_seq_length: 12288
+  vocab_size: 260
+  ffn_dim_multiplier: 1.0
+  patch_size: 6.0
+  patching_mode: cblt
+  patching_threshold: 0.0723
+  attn_impl: xformers
+  attn_bias_type: block_causal
+  local_attention_window_len: 512
+  use_local_encoder_transformer: true
+  cross_attn_encoder: true
+  cross_attn_decoder: true
+  cross_attn_all_layers_encoder: true
+  cross_attn_all_layers_decoder: true
+  cross_attn_init_by_pooling: true
+  cross_attn_use_flex_attention: true
+  cross_attn_k: 8
+  cross_attn_nheads: 4
+  cross_attn_window_encoder: 512
+  cross_attn_window_decoder: 512
+  downsampling_by_pooling: max
+  share_encoder_decoder_emb: true
+  log_patch_lengths: true
+  monotonicity: true
+data:
+  root_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus
+  preprocess_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus/preprocess
+  entropy_model_name: transformer_100m
+  sources:
+    corpus: 1.0
+  batch_size: 8
+  seq_len: 4096
+  max_encoder_seq_length: 12288
+  prefetch_size: 64
+  load_async: true
+  add_patches: true
+  add_bos: true
+  add_eos: true
+  pad_to_max_length: true
+  patcher_args:
+    patching_mode: cblt
+    cblt_aggregation: avg
+    threshold: 0.0723
+    monotonicity: true
+    patching_device: cuda
+    realtime_patching: true
+    entropy_model_checkpoint_dir: /gs/bs/tga-RLA/yoshida/blt_runs/entropy_stage_run/frozen_entropy_285000/consolidated
+  tokenizer_args:
+    name: blt
+    init_kwargs:
+      bpe_tokenizer_path: /gs/bs/tga-RLA/yoshida/blt_data/tokenizer/tokenizer.model
+profiling:
+  run: false
+checkpoint:
+  dump:
+    every: 2000
+    keep: -1
+  eval:
+    every: 10000
+    keep: -1
+logging:
+  freq: 10
+eval_on_gpus: 1
+eval: null
