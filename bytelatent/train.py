@@ -366,6 +366,9 @@ def train(args: TrainArgs):
         step_losses: list[float] = []
         step_tok_losses: list[float] = []
         n_bytes: int = 0
+        n_patches: int = 0          # Chat Opt1 ③: bytes/patch 監視（interval）
+        cum_n_bytes: int = 0        # 学習開始からの累積
+        cum_n_patches: int = 0
         while train_state.step < args.steps and (
             args.max_steps is None or train_state.step < args.max_steps
         ):
@@ -388,7 +391,9 @@ def train(args: TrainArgs):
             mask = None if batch.mask is None else torch.from_numpy(batch.mask).cuda()
 
             if args.data.tokenizer_args.name in ["bytes", "blt"]:
-                n_bytes += batch_y.numel() if mask is None else mask.sum()
+                _nb = batch_y.numel() if mask is None else mask.sum()
+                n_bytes += _nb
+                cum_n_bytes += int(_nb)
             elif args.data.tokenizer_args.name in ["sp", "tiktoken"]:
                 for example in batch.y:
                     target_tokens = tokenizer.decode(example.tolist(), cut_at_eos=False)
@@ -401,6 +406,12 @@ def train(args: TrainArgs):
                 raise ValueError(
                     f"Unexpected tokenizer to count n_bytes for: {args.data.tokenizer_args.name}"
                 )
+
+            # Chat Opt1 ③: patch数（非ゼロ patch_lengths を計数）= bytes/patch 分母
+            if batch_patch_lengths is not None:
+                _np = int((batch_patch_lengths > 0).sum().item())
+                n_patches += _np
+                cum_n_patches += _np
 
             if (
                 not args.train_entropy_model
@@ -593,6 +604,15 @@ def train(args: TrainArgs):
                     / interval_total_n_bytes_across_gpus
                 )
 
+                # Chat Opt1 ③: bytes/patch（対称DPなので per-gpu比≈global比・整数で厳密）
+                #   bpp_inst=この interval の実効レート / bpp_cumulative=学習開始からの累積
+                bpp_inst = (
+                    int(interval_total_n_bytes_per_gpu) / n_patches if n_patches else 0.0
+                )
+                bpp_cumulative = (
+                    cum_n_bytes / cum_n_patches if cum_n_patches else 0.0
+                )
+
                 metric_dict = {
                     "global_step": train_state.step,
                     "acc_step": train_state.acc_step,
@@ -617,6 +637,11 @@ def train(args: TrainArgs):
                     "bpb": {
                         "interval_per_gpu": to_py_num(interval_bpb_per_gpu),
                         "interval_across_gpus": to_py_num(interval_bpb_across_gpus),
+                    },
+                    "patch": {
+                        "bpp_inst": bpp_inst,
+                        "bpp_cumulative": bpp_cumulative,
+                        "n_patches_interval_per_gpu": n_patches,
                     },
                     "n_bytes": {
                         "interval_per_gpu": to_py_num(interval_total_n_bytes_per_gpu),
@@ -654,11 +679,14 @@ def train(args: TrainArgs):
                     f"  lr: {curr_lr:.2e}"
                     f"  n_bytes_gpu: {int(interval_total_n_bytes_per_gpu)}"
                     f"  n_bytes_sum: {int(interval_total_n_bytes_across_gpus)}"
+                    f"  bpp_inst: {bpp_inst:.3f}"
+                    f"  bpp_cum: {bpp_cumulative:.3f}"
                     f"  mem: {gpu_mem_stats.max_active_pct:.0f}%"
                     f"  pow: {gpu_mem_stats.power_draw/1000} W"
                 )
 
                 n_bytes = 0
+                n_patches = 0          # cum_* は累積なのでリセットしない
                 step_losses = []
                 step_tok_losses = []
                 gpu_memory_monitor.reset_peak_stats()
