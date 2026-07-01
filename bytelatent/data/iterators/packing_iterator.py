@@ -1,9 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 from enum import Enum
+from logging import getLogger
 from typing import Any
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
+
+logger = getLogger()
 
 from bytelatent.data.data_types import Batch, BltSequence
 from bytelatent.data.iterators.abstract_iterator import (
@@ -79,6 +82,15 @@ def truncate_batch(
     seq_lengths = batch.patch_lengths.sum(axis=1)
     max_length_adj = max_length + 1
     if np.any(seq_lengths > max_length_adj):
+        # Chat Opt A ガード: byte予算窓では構造的に発火しないはず。発火=設計破綻の兆候。
+        logger.warning(
+            "truncate_batch FIRED on %d/%d rows (max window bytes=%d > %d). "
+            "byte-budget windowing should structurally prevent this — investigate.",
+            int((seq_lengths > max_length_adj).sum()),
+            len(seq_lengths),
+            int(seq_lengths.max()),
+            max_length_adj,
+        )
         for i in range(batch.x.shape[0]):
             if seq_lengths[i] > max_length_adj:
                 # Find id of patch that tips over max_length + 1
@@ -226,18 +238,19 @@ class PackingIterator(StatefulIterator[Batch, PackingIteratorState]):
             tokens: list[list[int]] = []
             masks: list[list[bool]] = []
             patch_lengths: list[list[int]] = []
+            n_stream = 0  # Chat Opt A ⑦: truncation前の窓バイト合算（stream消費）
             stop_iteration = False
             try:
                 for _ in range(self.packing_args.batch_size):
                     sequence = next(sequence_iter)
                     _tokens = sequence.tokens
+                    n_stream += len(_tokens)  # ⑦: 窓の実バイト（BOS/truncate前）
                     _mask = sequence.mask
                     _patch_lengths = sequence.patch_lengths
                     assert (
                         _patch_lengths is not None
                     ), "patch lengths are required for packing based on patches."
-                    # Reminder: seq_len is in terms of patches
-                    assert len(sequence.patch_lengths) == self.packing_args.seq_len
+                    # Chat Opt A: 窓は「バイト予算」なので patch 数は窓ごとに可変（seq_len固定を廃止）
                     last_patch_length = 0
                     if _patch_lengths[0] > 1:
                         last_patch_length = _patch_lengths[-1]
@@ -252,10 +265,12 @@ class PackingIterator(StatefulIterator[Batch, PackingIteratorState]):
             if len(tokens) == 0 and stop_iteration:
                 break
 
-            x_patch_lengths = np.array(patch_lengths)
-            assert (
-                x_patch_lengths.shape[1] == seq_len
-            ), f"{x_patch_lengths.shape[1]} vs {seq_len}"
+            # Chat Opt A: 窓ごとに patch 数が可変 → バッチ内最大実patch数に0パディング（動的）
+            real_np = [len(pl) for pl in patch_lengths]
+            max_np = max(real_np)
+            x_patch_lengths = np.zeros((len(patch_lengths), max_np), dtype=np.int64)
+            for _i, _pl in enumerate(patch_lengths):
+                x_patch_lengths[_i, : len(_pl)] = _pl
             # pad batch to same length
             tok_seq_len = max([len(toks) for toks in tokens]) - 1
             x = np.full((batch_size, tok_seq_len), fill_value=pad_id)
@@ -264,8 +279,8 @@ class PackingIterator(StatefulIterator[Batch, PackingIteratorState]):
             for i, tok_seq in enumerate(tokens):
                 x[i, : len(tok_seq) - 1] = tok_seq[:-1]
                 y[i, : len(tok_seq) - 1] = tok_seq[1:]
-                # Adjust patch lengths to match x
-                x_patch_lengths[i, -1] += tok_seq_len - (len(tok_seq) - 1)
+                # Adjust patch lengths to match x（最後の「実」パッチに寄せる＝0パディング列を避ける）
+                x_patch_lengths[i, real_np[i] - 1] += tok_seq_len - (len(tok_seq) - 1)
 
             if x_patch_lengths.shape[0] < batch_size:
                 if final_leftover_batch:
@@ -289,8 +304,8 @@ class PackingIterator(StatefulIterator[Batch, PackingIteratorState]):
 
             assert x_patch_lengths.shape == (
                 batch_size,
-                seq_len,
-            ), f"{x_patch_lengths.shape} vs {(batch_size, seq_len)}"
+                max_np,
+            ), f"{x_patch_lengths.shape} vs {(batch_size, max_np)}"
 
             if enable_byte_ngrams:
                 raise NotImplementedError()
@@ -303,6 +318,7 @@ class PackingIterator(StatefulIterator[Batch, PackingIteratorState]):
                 patch_lengths=x_patch_lengths,
                 ngram_ids=ngram_ids,
                 mask=_merge_patch_seq_masks(batch_size, tok_seq_len, masks),
+                n_stream_bytes=n_stream,
             )
 
             assert (

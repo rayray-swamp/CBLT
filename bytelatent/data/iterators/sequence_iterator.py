@@ -25,6 +25,10 @@ class SequencePackingArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     output_seq_len: int
     buffer_size: int
+    # byte-budget windowing (Chat Opt A, 2026-07-02): 窓を「バイト予算」で構成する。
+    # None なら従来の「output_seq_len パッチ固定」窓（後方互換・eval等）。
+    # 学習では max_encoder_seq_length を渡す → 1窓 ≤ byte_budget バイト・パッチ丸ごと・破棄ゼロ。
+    byte_budget: int | None = None
 
 
 class SequenceIteratorState(PydanticIteratorState):
@@ -55,7 +59,8 @@ def get_datafile(
     elif isinstance(iterator, LimitIterator):
         return get_datafile(iterator.base_iterator)
     else:
-        raise NotImplementedError()
+        # ログ用途のみ。未知の iterator（テストのモック等）でクラッシュさせない。
+        return f"<{type(iterator).__name__}>"
 
 
 class SequenceIterator(StatefulIterator):
@@ -70,6 +75,7 @@ class SequenceIterator(StatefulIterator):
         self.sequence_packing_args = sequence_packing_args
         self.output_seq_len = sequence_packing_args.output_seq_len
         self.buffer_size = sequence_packing_args.buffer_size
+        self.byte_budget = sequence_packing_args.byte_budget
         if rng_state is None:
             self.rng = None
         else:
@@ -85,6 +91,9 @@ class SequenceIterator(StatefulIterator):
         )
 
     def create_iter(self):
+        if self.byte_budget is not None:
+            yield from self._create_iter_byte_budget()
+            return
         example_iter = self.preprocess_iterator.create_iter()
         n_buffer_patches = self.buffer_size * self.output_seq_len
 
@@ -171,3 +180,86 @@ class SequenceIterator(StatefulIterator):
                             mask=seq_mask[idx],
                             patch_lengths=None,
                         )
+
+    def _create_iter_byte_budget(self):
+        """バイト予算窓（Chat Opt A・2026-07-02）: 窓を byte_budget バイト以内でパッチを
+        丸ごと詰める。パッチは絶対に分割しない（cblt の文字保護 mid_char_split=0 を維持）。
+        入り切らないパッチ（と対応 tokens/mask）は次窓の先頭へ繰越＝破棄ゼロ（ストリーム消費
+        バイト == 学習バイト）。窓の実バイト ≈ byte_budget − 端数。patch 数は窓ごとに可変。
+        LoopingIterator の周回境界でも buffer が継続するので不変条件を保つ。"""
+        example_iter = self.preprocess_iterator.create_iter()
+        budget = self.byte_budget
+        add_patches = self.preprocess_iterator.add_patches
+        pls: list[int] = []
+        toks: list[int] = []
+        msks: list[bool] = []
+        win: list = []
+        first = True
+        logger.info(
+            "Starting first buffer (byte-budget=%d) for: %s",
+            budget,
+            get_datafile(self.preprocess_iterator),
+        )
+
+        def cut_windows():
+            i = 0  # 消費済 patch 数
+            b = 0  # 消費済 byte 数
+            npl = len(pls)
+            while i < npl:
+                cum = 0
+                n = 0
+                while i + n < npl and cum + pls[i + n] <= budget:
+                    cum += pls[i + n]
+                    n += 1
+                forced = False
+                if n == 0:
+                    # 単一パッチが budget 超（極稀・分割禁止なので単独窓に）
+                    n = 1
+                    cum = pls[i]
+                    forced = True
+                if i + n < npl or forced:
+                    win.append((pls[i : i + n], toks[b : b + cum], msks[b : b + cum]))
+                    i += n
+                    b += cum
+                else:
+                    # i+n == npl かつ 非forced: 次パッチで budget 到達しうる → 待つ
+                    break
+            if i:
+                del pls[:i]
+                del toks[:b]
+                del msks[:b]
+
+        for example in example_iter:
+            assert example.tokens is not None and example.mask is not None
+            assert len(example.tokens) == len(example.mask) and len(example.tokens) != 0
+            if add_patches:
+                assert example.patch_lengths is not None
+                assert len(example.tokens) == sum(example.patch_lengths)
+                pls.extend(example.patch_lengths)
+            else:
+                pls.extend([1] * len(example.tokens))
+            toks.extend(example.tokens)
+            msks.extend(example.mask)
+            cut_windows()
+            while len(win) >= self.buffer_size:
+                if first:
+                    first = False
+                    logger.info(
+                        "First buffer complete for: %s",
+                        get_datafile(self.preprocess_iterator),
+                    )
+                batch = win[: self.buffer_size]
+                del win[: self.buffer_size]
+                if self.rng is None:
+                    order = list(range(len(batch)))
+                else:
+                    order = self.rng.permutation(len(batch))
+                for idx in order:
+                    w_pl, w_tok, w_msk = batch[idx]
+                    assert sum(w_pl) == len(w_tok) == len(w_msk)
+                    assert w_pl[0] > 0
+                    yield BltSequence(
+                        tokens=w_tok,
+                        mask=w_msk,
+                        patch_lengths=(w_pl if add_patches else None),
+                    )

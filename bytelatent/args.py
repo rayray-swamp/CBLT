@@ -158,6 +158,7 @@ class DataloaderArgs(BaseModel):
         sequence_packing_args = SequencePackingArgs(
             output_seq_len=self.seq_len,
             buffer_size=self.buffer_size,
+            byte_budget=self.max_encoder_seq_length,  # Chat Opt A: 窓=バイト予算（パッチ数固定を廃止）
         )
         source_to_sequence_iterator: dict[str, SequenceIterator] = {}
         for dataset_path in self.sources:

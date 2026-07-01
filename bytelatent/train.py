@@ -369,6 +369,7 @@ def train(args: TrainArgs):
         n_patches: int = 0          # Chat Opt1 ③: bytes/patch 監視（interval）
         cum_n_bytes: int = 0        # 学習開始からの累積
         cum_n_patches: int = 0
+        cum_stream_bytes: int = 0   # Chat Opt A ⑦: stream から消費した実バイト累積（破棄検出）
         while train_state.step < args.steps and (
             args.max_steps is None or train_state.step < args.max_steps
         ):
@@ -412,6 +413,10 @@ def train(args: TrainArgs):
                 _np = int((batch_patch_lengths > 0).sum().item())
                 n_patches += _np
                 cum_n_patches += _np
+
+            # Chat Opt A ⑦: stream 消費バイト累積（byte予算窓は破棄ゼロ→cum_n_bytes と一致するはず）
+            if getattr(batch, "n_stream_bytes", None) is not None:
+                cum_stream_bytes += int(batch.n_stream_bytes)
 
             if (
                 not args.train_entropy_model
@@ -613,6 +618,20 @@ def train(args: TrainArgs):
                     cum_n_bytes / cum_n_patches if cum_n_patches else 0.0
                 )
 
+                # Chat Opt A ⑦: 恒久ゲート — stream消費バイト == 学習バイト（破棄ゼロ）を確認。
+                # byte予算窓なら discard_frac ~ 0（BOS/pad由来の微差のみ）。旧窓bugなら ~0.88。
+                discard_frac = (
+                    1.0 - cum_n_bytes / cum_stream_bytes if cum_stream_bytes else 0.0
+                )
+                if discard_frac > 0.02:
+                    logger.warning(
+                        "GATE7 stream discard=%.3f%% (cum_stream=%d cum_train=%d) — "
+                        "byte-budget windowing should keep this ~0; investigate discard bug.",
+                        discard_frac * 100,
+                        cum_stream_bytes,
+                        cum_n_bytes,
+                    )
+
                 metric_dict = {
                     "global_step": train_state.step,
                     "acc_step": train_state.acc_step,
@@ -642,6 +661,7 @@ def train(args: TrainArgs):
                         "bpp_inst": bpp_inst,
                         "bpp_cumulative": bpp_cumulative,
                         "n_patches_interval_per_gpu": n_patches,
+                        "stream_discard_frac": discard_frac,
                     },
                     "n_bytes": {
                         "interval_per_gpu": to_py_num(interval_total_n_bytes_per_gpu),
@@ -681,6 +701,7 @@ def train(args: TrainArgs):
                     f"  n_bytes_sum: {int(interval_total_n_bytes_across_gpus)}"
                     f"  bpp_inst: {bpp_inst:.3f}"
                     f"  bpp_cum: {bpp_cumulative:.3f}"
+                    f"  discard: {discard_frac*100:.2f}%"
                     f"  mem: {gpu_mem_stats.max_active_pct:.0f}%"
                     f"  pow: {gpu_mem_stats.power_draw/1000} W"
                 )

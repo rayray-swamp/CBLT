@@ -35,7 +35,7 @@ model:
   ffn_dim_multiplier: 1.0
   patch_size: 6.0
   patching_mode: entropy
-  patching_threshold: 0.7268
+  patching_threshold: 0.6747
   attn_impl: xformers
   attn_bias_type: block_causal
   local_attention_window_len: 512
@@ -72,7 +72,7 @@ data:
   patcher_args:
     patching_mode: entropy
     cblt_aggregation: sqrt
-    threshold: 0.7268
+    threshold: 0.6747
     monotonicity: true
     patching_device: cuda
     realtime_patching: false

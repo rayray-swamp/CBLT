@@ -54,6 +54,9 @@ class Batch:
     patch_lengths: np.ndarray | None = None
     ngram_ids: np.ndarray | None = None
     is_final: bool = False
+    # Chat Opt A ⑦: この batch が stream から消費した実バイト（truncation前の窓バイト合算）。
+    # 学習累積 cum_n_bytes と一致するはず（破棄ゼロ）。乖離=破棄バグの兆候。
+    n_stream_bytes: int | None = None
 
     def to_python_dict(self) -> dict:
         x = self.x.tolist()
@@ -77,6 +80,7 @@ class Batch:
             "patch_lengths": patch_lengths,
             "ngram_ids": ngram_ids,
             "is_final": self.is_final,
+            "n_stream_bytes": self.n_stream_bytes,
         }
 
     @classmethod
@@ -102,4 +106,5 @@ class Batch:
             patch_lengths=patch_lengths,
             ngram_ids=ngram_ids,
             is_final=data["is_final"],
+            n_stream_bytes=data.get("n_stream_bytes"),
         )

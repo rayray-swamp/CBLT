@@ -1,6 +1,6 @@
-dump_dir: /gs/bs/tga-RLA/yoshida/blt_runs/body/lead_blt_body_cblt_r6
-name: blt_body_cblt_r6
-steps: 560000
+dump_dir: /gs/bs/tga-RLA/yoshida/blt_runs/body/iso
+name: blt_body_iso
+steps: 20
 max_steps: null
 probe_freq: null
 seed: 777
@@ -34,8 +34,8 @@ model:
   vocab_size: 260
   ffn_dim_multiplier: 1.0
   patch_size: 6.0
-  patching_mode: cblt
-  patching_threshold: 0.2814
+  patching_mode: entropy
+  patching_threshold: 0.6367
   attn_impl: xformers
   attn_bias_type: block_causal
   local_attention_window_len: 512
@@ -55,8 +55,8 @@ model:
   log_patch_lengths: true
   monotonicity: true
 data:
-  root_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus_clean
-  preprocess_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus_clean/preprocess
+  root_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus
+  preprocess_dir: /gs/bs/tga-RLA/yoshida/blt_data/largecorpus/preprocess
   entropy_model_name: transformer_100m
   sources:
     corpus: 1.0
@@ -70,13 +70,13 @@ data:
   add_eos: true
   pad_to_max_length: true
   patcher_args:
-    patching_mode: cblt
+    patching_mode: entropy
     cblt_aggregation: sqrt
-    threshold: 0.2814
+    threshold: 0.6367
     monotonicity: true
     patching_device: cuda
-    realtime_patching: false
-    entropy_model_checkpoint_dir: null
+    realtime_patching: true
+    entropy_model_checkpoint_dir: /gs/bs/tga-RLA/yoshida/blt_runs/entropy_stage_run/frozen_entropy_285000/consolidated
   tokenizer_args:
     name: blt
     init_kwargs:
@@ -86,11 +86,11 @@ profiling:
 checkpoint:
   dump:
     every: 10000
-    keep: 2
+    keep: -1
   eval:
     every: 10000
     keep: -1
 logging:
-  freq: 100
+  freq: 10
 eval_on_gpus: 1
 eval: null
